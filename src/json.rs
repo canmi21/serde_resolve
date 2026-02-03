@@ -3,13 +3,10 @@
 //!
 //! This module is available with the `json` feature and supports `no_std` environments.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::pin::Pin;
-
 use serde_json::{Map, Value};
 
-use crate::{Config, Error, Resolved, Resolver};
+use crate::{Config, Error, Resolver};
 
 /// Resolve all strings in a JSON [`Value`].
 ///
@@ -57,74 +54,38 @@ pub async fn resolve<R>(
 where
 	R: Resolver,
 {
-	resolve_recursive(value, resolver, config, 0).await
-}
+	#[cfg(feature = "tracing")]
+	let mut path = Vec::new();
 
-/// Internal recursive implementation.
-fn resolve_recursive<'a, R>(
-	value: Value,
-	resolver: &'a R,
-	config: &'a Config,
-	depth: usize,
-) -> Pin<Box<dyn core::future::Future<Output = Result<Value, Error<R::Error>>> + Send + 'a>>
-where
-	R: Resolver,
-{
-	Box::pin(async move {
-		// Check depth limit
-		if depth > config.max_depth {
-			return Err(Error::depth_exceeded(config.max_depth));
-		}
-
+	resolve_recursive(
+		value,
+		resolver,
+		config,
+		0,
 		#[cfg(feature = "tracing")]
-		tracing::trace!(depth, value_type = ?value_type_name(&value), "resolving");
-
-		match value {
-			Value::String(s) => match resolver.resolve(&s).await.map_err(Error::resolver)? {
-				Resolved::Changed(new_s) => {
-					#[cfg(feature = "tracing")]
-					tracing::trace!(original = %s, resolved = %new_s, "string changed");
-					Ok(Value::String(new_s))
-				}
-				Resolved::Unchanged => {
-					#[cfg(feature = "tracing")]
-					tracing::trace!(value = %s, "string unchanged");
-					Ok(Value::String(s))
-				}
-			},
-
-			Value::Array(arr) => {
-				let mut result = Vec::with_capacity(arr.len());
-				for item in arr {
-					result.push(resolve_recursive(item, resolver, config, depth + 1).await?);
-				}
-				Ok(Value::Array(result))
-			}
-
-			Value::Object(map) => {
-				let mut result = Map::with_capacity(map.len());
-				for (key, val) in map {
-					// Optionally resolve keys
-					let resolved_key = if config.resolve_keys {
-						match resolver.resolve(&key).await.map_err(Error::resolver)? {
-							Resolved::Changed(new_key) => new_key,
-							Resolved::Unchanged => key,
-						}
-					} else {
-						key
-					};
-
-					let resolved_val = resolve_recursive(val, resolver, config, depth + 1).await?;
-					result.insert(resolved_key, resolved_val);
-				}
-				Ok(Value::Object(result))
-			}
-
-			// Pass through non-string primitives unchanged
-			other @ (Value::Null | Value::Bool(_) | Value::Number(_)) => Ok(other),
-		}
-	})
+		&mut path,
+	)
+	.await
 }
+
+impl_resolve_recursive!(
+		Value,
+		Value::String,
+		Value::Array,
+		Value::Object,
+		Map::with_capacity,
+		|k: &alloc::string::String| k.clone(),
+		resolver, config, depth, path, key,
+		{
+				match resolver.resolve(&key).await.map_err(crate::Error::resolver)? {
+						crate::Resolved::Changed(new_key) => new_key,
+						crate::Resolved::Unchanged => key,
+				}
+		},
+		{
+				other @ (Value::Null | Value::Bool(_) | Value::Number(_)) => Ok(other),
+		}
+);
 
 #[cfg(feature = "tracing")]
 fn value_type_name(value: &Value) -> &'static str {
@@ -141,6 +102,7 @@ fn value_type_name(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Resolved;
 	use alloc::string::ToString;
 	use core::convert::Infallible;
 
@@ -234,7 +196,7 @@ mod tests {
 	async fn test_depth_limit() {
 		// Create deeply nested structure
 		let mut value = Value::String("deep".into());
-		for _ in 0..50 {
+		for _ in 0..32 {
 			value = serde_json::json!({ "nested": value });
 		}
 
@@ -244,11 +206,11 @@ mod tests {
 				let s = s.to_string();
 				async move { Ok::<_, Infallible>(Resolved::changed(s)) }
 			},
-			&Config::default().max_depth(10),
+			&Config::default().max_depth(32),
 		)
 		.await;
 
-		assert!(matches!(result, Err(Error::DepthExceeded { limit: 10 })));
+		assert!(matches!(result, Err(Error::DepthExceeded { limit: 32 })));
 	}
 
 	#[tokio::test]

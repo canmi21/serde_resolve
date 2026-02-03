@@ -1,9 +1,9 @@
-/* src/yaml.rs */
-
+//! YAML support via `serde_yaml`.
 //!
 //! This module requires the `std` feature.
 
 use alloc::boxed::Box;
+#[cfg(feature = "tracing")]
 use alloc::vec::Vec;
 use serde_yaml::Value;
 
@@ -207,5 +207,86 @@ mod tests {
 			}
 			_ => panic!("Expected Tagged value"),
 		}
+	}
+
+	#[tokio::test]
+	async fn test_depth_limit() {
+		let mut value = Value::String("deep".into());
+		for _ in 0..32 {
+			let mut map = Mapping::new();
+			map.insert(Value::String("nested".into()), value);
+			value = Value::Mapping(map);
+		}
+
+		let result = resolve(
+			value,
+			&|s: &str| {
+				let s = s.to_string();
+				async move { Ok::<_, Infallible>(Resolved::changed(s)) }
+			},
+			&Config::default().max_depth(32),
+		)
+		.await;
+
+		assert!(matches!(result, Err(Error::DepthExceeded { limit: 32 })));
+	}
+
+	#[tokio::test]
+	async fn test_resolver_error() {
+		#[derive(Debug)]
+		struct MyError;
+
+		let input = Value::String("hello".into());
+		let result = resolve(
+			input,
+			&|_: &str| async move { Err::<Resolved, _>(MyError) },
+			&Config::default(),
+		)
+		.await;
+
+		assert!(matches!(result, Err(Error::Resolver(MyError))));
+	}
+
+	#[tokio::test]
+	async fn test_empty_structures() {
+		let empty_seq = resolve(
+			Value::Sequence(vec![]),
+			&|s: &str| {
+				let s = s.to_string();
+				async move { Ok::<_, Infallible>(Resolved::changed(s)) }
+			},
+			&Config::default(),
+		)
+		.await
+		.unwrap();
+		assert_eq!(empty_seq, Value::Sequence(vec![]));
+
+		let empty_map = resolve(
+			Value::Mapping(Mapping::new()),
+			&|s: &str| {
+				let s = s.to_string();
+				async move { Ok::<_, Infallible>(Resolved::changed(s)) }
+			},
+			&Config::default(),
+		)
+		.await
+		.unwrap();
+		assert_eq!(empty_map, Value::Mapping(Mapping::new()));
+	}
+
+	#[tokio::test]
+	async fn test_non_string_unchanged() {
+		let input = Value::Number(42.into());
+		let output = resolve(
+			input.clone(),
+			&|s: &str| {
+				let s = s.to_string();
+				async move { Ok::<_, Infallible>(Resolved::changed(s.to_uppercase())) }
+			},
+			&Config::default(),
+		)
+		.await
+		.unwrap();
+		assert_eq!(output, input);
 	}
 }

@@ -1,8 +1,8 @@
-/* src/json.rs */
-
+//! JSON support via `serde_json`.
 //!
 //! This module is available with the `json` feature and supports `no_std` environments.
 
+#[cfg(feature = "tracing")]
 use alloc::vec::Vec;
 use serde_json::{Map, Value};
 
@@ -297,5 +297,38 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(empty_object, Value::Object(Map::new()));
+	}
+
+	#[tokio::test]
+	async fn test_depth_zero() {
+		let input = Value::String("hello".into());
+		let result = resolve(
+			input,
+			&|s: &str| {
+				let s = s.to_string();
+				async move { Ok::<_, Infallible>(Resolved::changed(s)) }
+			},
+			&Config::default().max_depth(0),
+		)
+		.await;
+
+		assert!(matches!(result, Err(Error::DepthExceeded { limit: 0 })));
+	}
+
+	#[tokio::test]
+	async fn test_nested_arrays() {
+		let input = serde_json::json!([["a", "b"], ["c", "d"]]);
+		let output = resolve(
+			input,
+			&|s: &str| {
+				let s = s.to_string();
+				async move { Ok::<_, Infallible>(Resolved::changed(s.to_uppercase())) }
+			},
+			&Config::default(),
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(output, serde_json::json!([["A", "B"], ["C", "D"]]));
 	}
 }

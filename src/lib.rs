@@ -50,10 +50,6 @@ extern crate alloc;
 use alloc::string::String;
 use core::future::Future;
 
-// ============================================================================
-// PathSegment
-// ============================================================================
-
 /// A segment in a value path, used for tracing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathSegment {
@@ -62,10 +58,6 @@ pub enum PathSegment {
 	/// Array index
 	Index(usize),
 }
-
-// ============================================================================
-// Macro: impl_resolve_recursive
-// ============================================================================
 
 macro_rules! impl_resolve_recursive {
     (
@@ -90,7 +82,6 @@ macro_rules! impl_resolve_recursive {
             R: crate::Resolver,
         {
             alloc::boxed::Box::pin(async move {
-                // Task 2: Fix depth check (>=)
                 if $depth >= $config.max_depth {
                     return Err(crate::Error::depth_exceeded($config.max_depth));
                 }
@@ -116,9 +107,9 @@ macro_rules! impl_resolve_recursive {
 
                     $variant_array(arr) => {
                         let mut result = alloc::vec::Vec::with_capacity(arr.len());
-                        for (i, item) in arr.into_iter().enumerate() {
+                        for (_i, item) in arr.into_iter().enumerate() {
                             #[cfg(feature = "tracing")]
-                            $path.push(crate::PathSegment::Index(i));
+                            $path.push(crate::PathSegment::Index(_i));
 
                             let res = resolve_recursive(
                                 item,
@@ -183,10 +174,6 @@ pub mod yaml;
 #[cfg(feature = "toml")]
 pub mod toml;
 
-// ============================================================================
-// Resolved
-// ============================================================================
-
 /// Result of resolving a single string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
@@ -225,7 +212,6 @@ impl Resolved {
 	}
 }
 
-// Task 3: From trait impls
 impl From<String> for Resolved {
 	#[inline]
 	fn from(s: String) -> Self {
@@ -239,10 +225,6 @@ impl<'a> From<&'a str> for Resolved {
 		Self::Changed(s.into())
 	}
 }
-
-// ============================================================================
-// Config
-// ============================================================================
 
 /// Configuration for resolve operations.
 #[derive(Debug, Clone)]
@@ -291,7 +273,6 @@ impl Config {
 		self
 	}
 
-	// Task 4: unlimited_depth
 	/// Disable depth limiting.
 	///
 	/// # Warning
@@ -305,10 +286,6 @@ impl Config {
 		self
 	}
 }
-
-// ============================================================================
-// Error
-// ============================================================================
 
 /// Error type for resolve operations.
 #[derive(Debug)]
@@ -356,16 +333,43 @@ impl<E> Error<E> {
 	}
 }
 
-// ============================================================================
-// Resolver Trait
-// ============================================================================
-
 /// Trait for async string resolvers.
+///
+/// Implementors decide:
+/// - Which strings to transform ([`Resolved::Changed`])
+/// - Which strings to skip ([`Resolved::Unchanged`])
+/// - When to abort with an error ([`Err`])
+///
+/// # Example
+///
+/// ```rust
+/// use serde_resolve::{Resolved, Resolver};
+///
+/// struct MyResolver;
+///
+/// impl Resolver for MyResolver {
+///     type Error = std::convert::Infallible;
+///
+///     async fn resolve(&self, input: &str) -> Result<Resolved, Self::Error> {
+///         if input.starts_with("UPPER:") {
+///             Ok(Resolved::changed(input[6..].to_uppercase()))
+///         } else {
+///             Ok(Resolved::unchanged())
+///         }
+///     }
+/// }
+/// ```
 pub trait Resolver: Send + Sync {
 	/// Error type returned by this resolver.
 	type Error: Send;
 
 	/// Resolve a string value.
+	///
+	/// # Returns
+	///
+	/// - `Ok(Resolved::Changed(new_value))` - Use the transformed value
+	/// - `Ok(Resolved::Unchanged)` - Keep the original value
+	/// - `Err(e)` - Abort the entire resolve operation
 	fn resolve(&self, input: &str) -> impl Future<Output = Result<Resolved, Self::Error>> + Send;
 }
 
@@ -383,11 +387,11 @@ where
 	}
 }
 
-// ============================================================================
-// Generic Struct Support (Task 7)
-// ============================================================================
-
 /// Error type for generic struct resolution.
+///
+/// This error type wraps errors that can occur during the serialize-resolve-deserialize
+/// round-trip when using [`resolve_struct`].
+#[cfg(feature = "json")]
 #[derive(Debug)]
 pub enum StructResolveError<E> {
 	/// Serialization error.
@@ -398,6 +402,7 @@ pub enum StructResolveError<E> {
 	Deserialize(serde_json::Error),
 }
 
+#[cfg(feature = "json")]
 impl<E: core::fmt::Display> core::fmt::Display for StructResolveError<E> {
 	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
 		match self {
@@ -408,7 +413,7 @@ impl<E: core::fmt::Display> core::fmt::Display for StructResolveError<E> {
 	}
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "json", feature = "std"))]
 impl<E: std::error::Error + 'static> std::error::Error for StructResolveError<E> {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		match self {
@@ -419,6 +424,17 @@ impl<E: std::error::Error + 'static> std::error::Error for StructResolveError<E>
 }
 
 /// Resolve strings in any serializable struct via JSON round-trip.
+///
+/// This function serializes the value to JSON, resolves all strings,
+/// and deserializes back to the original type.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Serialization fails
+/// - The resolver returns an error
+/// - The depth limit is exceeded
+/// - Deserialization fails
 #[cfg(feature = "json")]
 pub async fn resolve_struct<T, R>(
 	value: T,
@@ -434,4 +450,151 @@ where
 		.await
 		.map_err(StructResolveError::Resolve)?;
 	serde_json::from_value(resolved).map_err(StructResolveError::Deserialize)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use alloc::string::ToString;
+
+	#[test]
+	fn test_resolved_changed() {
+		let r = Resolved::changed("hello");
+		assert!(r.is_changed());
+		assert!(!r.is_unchanged());
+		assert_eq!(r, Resolved::Changed("hello".to_string()));
+	}
+
+	#[test]
+	fn test_resolved_unchanged() {
+		let r = Resolved::unchanged();
+		assert!(r.is_unchanged());
+		assert!(!r.is_changed());
+		assert_eq!(r, Resolved::Unchanged);
+	}
+
+	#[test]
+	fn test_resolved_from_string() {
+		let r: Resolved = String::from("test").into();
+		assert_eq!(r, Resolved::Changed("test".to_string()));
+	}
+
+	#[test]
+	fn test_resolved_from_str() {
+		let r: Resolved = "test".into();
+		assert_eq!(r, Resolved::Changed("test".to_string()));
+	}
+
+	#[test]
+	fn test_config_default() {
+		let config = Config::default();
+		assert_eq!(config.max_depth, 32);
+		assert!(!config.resolve_keys);
+	}
+
+	#[test]
+	fn test_config_builder() {
+		let config = Config::new().max_depth(10).resolve_keys(true);
+		assert_eq!(config.max_depth, 10);
+		assert!(config.resolve_keys);
+	}
+
+	#[test]
+	fn test_config_unlimited_depth() {
+		let config = Config::new().unlimited_depth();
+		assert_eq!(config.max_depth, usize::MAX);
+	}
+
+	#[test]
+	fn test_error_display() {
+		let err: Error<&str> = Error::resolver("custom error");
+		assert_eq!(err.to_string(), "resolver error: custom error");
+
+		let err: Error<&str> = Error::depth_exceeded(10);
+		assert_eq!(err.to_string(), "depth limit (10) exceeded");
+	}
+
+	#[test]
+	fn test_path_segment() {
+		let key = PathSegment::Key("foo".to_string());
+		let index = PathSegment::Index(42);
+
+		assert_eq!(key, PathSegment::Key("foo".to_string()));
+		assert_eq!(index, PathSegment::Index(42));
+		assert_ne!(key, index);
+	}
+}
+
+#[cfg(all(test, feature = "json"))]
+mod json_tests {
+	use super::*;
+	use alloc::string::ToString;
+	use core::convert::Infallible;
+	use serde::{Deserialize, Serialize};
+
+	#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+	struct TestStruct {
+		name: String,
+		value: i32,
+	}
+
+	#[tokio::test]
+	async fn test_resolve_struct_basic() {
+		let input = TestStruct {
+			name: "hello".to_string(),
+			value: 42,
+		};
+
+		let output = resolve_struct(
+			input,
+			&|s: &str| {
+				let s = s.to_string();
+				async move { Ok::<_, Infallible>(Resolved::changed(s.to_uppercase())) }
+			},
+			&Config::default(),
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(output.name, "HELLO");
+		assert_eq!(output.value, 42);
+	}
+
+	#[tokio::test]
+	async fn test_resolve_struct_unchanged() {
+		let input = TestStruct {
+			name: "hello".to_string(),
+			value: 42,
+		};
+
+		let output = resolve_struct(
+			input.clone(),
+			&|_: &str| async move { Ok::<_, Infallible>(Resolved::unchanged()) },
+			&Config::default(),
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(output, input);
+	}
+
+	#[tokio::test]
+	async fn test_resolve_struct_error() {
+		#[derive(Debug)]
+		struct MyError;
+
+		let input = TestStruct {
+			name: "hello".to_string(),
+			value: 42,
+		};
+
+		let result = resolve_struct(
+			input,
+			&|_: &str| async move { Err::<Resolved, _>(MyError) },
+			&Config::default(),
+		)
+		.await;
+
+		assert!(matches!(result, Err(StructResolveError::Resolve(_))));
+	}
 }

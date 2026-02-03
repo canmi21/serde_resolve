@@ -37,10 +37,27 @@ tracing = ["dep:tracing"]
 full = ["std", "json", "yaml", "toml", "tracing"]
 
 [[example]]
-name = "simple"
+name = "basic"
+required-features = ["json"]
+
+[[example]]
+name = "selective"
+required-features = ["json"]
+
+[[example]]
+name = "custom_resolver"
+required-features = ["json"]
+
+[[example]]
+name = "resolve_struct"
+required-features = ["json"]
+
+[[example]]
+name = "resolve_keys"
 required-features = ["json"]
 
 [dev-dependencies]
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints.rust]

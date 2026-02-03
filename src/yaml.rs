@@ -5,10 +5,9 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::pin::Pin;
 use serde_yaml::Value;
 
-use crate::{Config, Error, Resolved, Resolver};
+use crate::{Config, Error, Resolver};
 
 /// Resolve all strings in a YAML [`Value`].
 ///
@@ -21,69 +20,79 @@ pub async fn resolve<R>(
 where
 	R: Resolver,
 {
-	resolve_recursive(value, resolver, config, 0).await
+	#[cfg(feature = "tracing")]
+	let mut path = Vec::new();
+
+	resolve_recursive(
+		value,
+		resolver,
+		config,
+		0,
+		#[cfg(feature = "tracing")]
+		&mut path,
+	)
+	.await
 }
 
-fn resolve_recursive<'a, R>(
-	value: Value,
-	resolver: &'a R,
-	config: &'a Config,
-	depth: usize,
-) -> Pin<Box<dyn std::future::Future<Output = Result<Value, Error<R::Error>>> + Send + 'a>>
-where
-	R: Resolver,
-{
-	Box::pin(async move {
-		if depth > config.max_depth {
-			return Err(Error::depth_exceeded(config.max_depth));
-		}
-
-		match value {
-			Value::String(s) => match resolver.resolve(&s).await.map_err(Error::resolver)? {
-				Resolved::Changed(new_s) => Ok(Value::String(new_s)),
-				Resolved::Unchanged => Ok(Value::String(s)),
-			},
-
-			Value::Sequence(seq) => {
-				let mut result = Vec::with_capacity(seq.len());
-				for item in seq {
-					result.push(resolve_recursive(item, resolver, config, depth + 1).await?);
+impl_resolve_recursive!(
+		Value,
+		Value::String,
+		Value::Sequence,
+		Value::Mapping,
+		serde_yaml::Mapping::with_capacity,
+		|k: &Value| format!("{k:?}"),
+		resolver, config, depth, path, key,
+		{
+				resolve_recursive(
+						key,
+						resolver,
+						config,
+						depth + 1,
+						#[cfg(feature = "tracing")]
+						path,
+				)
+				.await?
+		},
+		{
+				// Tagged values - resolve inner
+				Value::Tagged(tagged) => {
+						let resolved_inner = resolve_recursive(
+								tagged.value,
+								resolver,
+								config,
+								depth + 1,
+								#[cfg(feature = "tracing")]
+								path,
+						)
+						.await?;
+						Ok(Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
+								tag: tagged.tag,
+								value: resolved_inner,
+						})))
 				}
-				Ok(Value::Sequence(result))
-			}
 
-			Value::Mapping(map) => {
-				let mut result = serde_yaml::Mapping::with_capacity(map.len());
-				for (key, val) in map {
-					let resolved_key = if config.resolve_keys {
-						resolve_recursive(key, resolver, config, depth + 1).await?
-					} else {
-						key
-					};
-					let resolved_val = resolve_recursive(val, resolver, config, depth + 1).await?;
-					result.insert(resolved_key, resolved_val);
-				}
-				Ok(Value::Mapping(result))
-			}
-
-			// Tagged values - resolve inner
-			Value::Tagged(tagged) => {
-				let resolved_inner = resolve_recursive(tagged.value, resolver, config, depth + 1).await?;
-				Ok(Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
-					tag: tagged.tag,
-					value: resolved_inner,
-				})))
-			}
-
-			// Pass through unchanged
-			other @ (Value::Null | Value::Bool(_) | Value::Number(_)) => Ok(other),
+				// Pass through unchanged
+				other @ (Value::Null | Value::Bool(_) | Value::Number(_)) => Ok(other),
 		}
-	})
+);
+
+#[cfg(feature = "tracing")]
+fn value_type_name(value: &Value) -> &'static str {
+	match value {
+		Value::Null => "null",
+		Value::Bool(_) => "bool",
+		Value::Number(_) => "number",
+		Value::String(_) => "string",
+		Value::Sequence(_) => "sequence",
+		Value::Mapping(_) => "mapping",
+		Value::Tagged(_) => "tagged",
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Resolved;
 	use alloc::string::ToString;
 	use core::convert::Infallible;
 	use serde_yaml::Mapping;

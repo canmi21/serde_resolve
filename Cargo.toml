@@ -36,11 +36,12 @@ tracing = ["dep:tracing"]
 
 full = ["std", "json", "yaml", "toml", "tracing"]
 
-#[[example]]
-#name = "{...}"
-#required-features = ["{...}"]
+[[example]]
+name = "simple"
+required-features = ["json"]
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints.rust]
 unsafe_code = "forbid"

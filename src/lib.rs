@@ -28,12 +28,10 @@
 //!         let s = s.to_string();
 //!         async move {
 //!             if s.contains("{{") {
-//!                 // Transform strings containing templates
 //!                 Ok::<_, std::convert::Infallible>(Resolved::Changed(
 //!                     s.replace("{{name}}", "World")
 //!                 ))
 //!             } else {
-//!                 // Skip strings without templates
 //!                 Ok(Resolved::Unchanged)
 //!             }
 //!         }
@@ -51,6 +49,130 @@ extern crate alloc;
 
 use alloc::string::String;
 use core::future::Future;
+
+// ============================================================================
+// PathSegment
+// ============================================================================
+
+/// A segment in a value path, used for tracing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathSegment {
+	/// Object/Map key
+	Key(String),
+	/// Array index
+	Index(usize),
+}
+
+// ============================================================================
+// Macro: impl_resolve_recursive
+// ============================================================================
+
+macro_rules! impl_resolve_recursive {
+    (
+        $value_type:ty,
+        $variant_string:path,
+        $variant_array:path,
+        $variant_object:path,
+        $map_constructor:expr,
+        $key_to_string:expr,
+        $resolver:ident, $config:ident, $depth:ident, $path:ident, $key:ident,
+        $resolve_key_logic:block,
+        { $($other_arms:tt)* }
+    ) => {
+        fn resolve_recursive<'a, R>(
+            value: $value_type,
+            $resolver: &'a R,
+            $config: &'a Config,
+            $depth: usize,
+            #[cfg(feature = "tracing")] $path: &'a mut alloc::vec::Vec<crate::PathSegment>,
+        ) -> core::pin::Pin<alloc::boxed::Box<dyn core::future::Future<Output = Result<$value_type, crate::Error<R::Error>>> + Send + 'a>>
+        where
+            R: crate::Resolver,
+        {
+            alloc::boxed::Box::pin(async move {
+                // Task 2: Fix depth check (>=)
+                if $depth >= $config.max_depth {
+                    return Err(crate::Error::depth_exceeded($config.max_depth));
+                }
+
+                #[cfg(feature = "tracing")]
+                tracing::trace!(depth = $depth, path = ?$path, value_type = ?value_type_name(&value), "resolving");
+
+                match value {
+                    $variant_string(s) => {
+                        match $resolver.resolve(&s).await.map_err(crate::Error::resolver)? {
+                            crate::Resolved::Changed(new_s) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::trace!(original = %s, resolved = %new_s, "string changed");
+                                Ok($variant_string(new_s))
+                            }
+                            crate::Resolved::Unchanged => {
+                                #[cfg(feature = "tracing")]
+                                tracing::trace!(value = %s, "string unchanged");
+                                Ok($variant_string(s))
+                            }
+                        }
+                    }
+
+                    $variant_array(arr) => {
+                        let mut result = alloc::vec::Vec::with_capacity(arr.len());
+                        for (i, item) in arr.into_iter().enumerate() {
+                            #[cfg(feature = "tracing")]
+                            $path.push(crate::PathSegment::Index(i));
+
+                            let res = resolve_recursive(
+                                item,
+                                $resolver,
+                                $config,
+                                $depth + 1,
+                                #[cfg(feature = "tracing")] $path
+                            ).await?;
+                            result.push(res);
+
+                            #[cfg(feature = "tracing")]
+                            $path.pop();
+                        }
+                        Ok($variant_array(result))
+                    }
+
+                    $variant_object(map) => {
+                        let mut result = $map_constructor(map.len());
+                        for ($key, val) in map {
+                            // Helper to get key string for tracing
+                            #[cfg(feature = "tracing")]
+                            let key_str = ($key_to_string)(&$key);
+
+                            // Optionally resolve keys
+                            let resolved_key = if $config.resolve_keys {
+                                $resolve_key_logic
+                            } else {
+                                $key
+                            };
+
+                            #[cfg(feature = "tracing")]
+                            $path.push(crate::PathSegment::Key(key_str));
+
+                            let resolved_val = resolve_recursive(
+                                val,
+                                $resolver,
+                                $config,
+                                $depth + 1,
+                                #[cfg(feature = "tracing")] $path
+                            ).await?;
+                            result.insert(resolved_key, resolved_val);
+
+                            #[cfg(feature = "tracing")]
+                            $path.pop();
+                        }
+                        Ok($variant_object(result))
+                    }
+
+                    $($other_arms)*
+                }
+            })
+        }
+    }
+}
 
 #[cfg(feature = "json")]
 pub mod json;
@@ -100,6 +222,21 @@ impl Resolved {
 	#[must_use]
 	pub const fn is_unchanged(&self) -> bool {
 		matches!(self, Self::Unchanged)
+	}
+}
+
+// Task 3: From trait impls
+impl From<String> for Resolved {
+	#[inline]
+	fn from(s: String) -> Self {
+		Self::Changed(s)
+	}
+}
+
+impl<'a> From<&'a str> for Resolved {
+	#[inline]
+	fn from(s: &'a str) -> Self {
+		Self::Changed(s.into())
 	}
 }
 
@@ -153,6 +290,20 @@ impl Config {
 		self.resolve_keys = resolve;
 		self
 	}
+
+	// Task 4: unlimited_depth
+	/// Disable depth limiting.
+	///
+	/// # Warning
+	///
+	/// This may cause stack overflow on deeply nested or malicious input.
+	/// Prefer using [`Config::max_depth`] with a reasonable limit in most cases.
+	#[inline]
+	#[must_use]
+	pub fn unlimited_depth(mut self) -> Self {
+		self.max_depth = usize::MAX;
+		self
+	}
 }
 
 // ============================================================================
@@ -204,51 +355,20 @@ impl<E> Error<E> {
 		Self::DepthExceeded { limit }
 	}
 }
+
 // ============================================================================
 // Resolver Trait
 // ============================================================================
 
 /// Trait for async string resolvers.
-///
-/// Implementors decide:
-/// - Which strings to transform (`Resolved::Changed`)
-/// - Which strings to skip (`Resolved::Unchanged`)
-/// - When to abort with an error (`Err`)
-///
-/// # Example
-///
-/// ```rust
-/// use serde_resolve::{Resolved, Resolver};
-///
-/// struct MyResolver;
-///
-/// impl Resolver for MyResolver {
-///     type Error = std::convert::Infallible;
-///
-///     async fn resolve(&self, input: &str) -> Result<Resolved, Self::Error> {
-///         if input.starts_with("UPPER:") {
-///             Ok(Resolved::changed(input[6..].to_uppercase()))
-///         } else {
-///             Ok(Resolved::unchanged())
-///         }
-///     }
-/// }
-/// ```
 pub trait Resolver: Send + Sync {
 	/// Error type returned by this resolver.
 	type Error: Send;
 
 	/// Resolve a string value.
-	///
-	/// # Returns
-	///
-	/// - `Ok(Resolved::Changed(new_value))` - Use the transformed value
-	/// - `Ok(Resolved::Unchanged)` - Keep the original value
-	/// - `Err(e)` - Abort the entire resolve operation
 	fn resolve(&self, input: &str) -> impl Future<Output = Result<Resolved, Self::Error>> + Send;
 }
 
-// Blanket impl for Fn(&str) -> Future<Output = Result<Resolved, E>>
 impl<F, Fut, E> Resolver for F
 where
 	F: Fn(&str) -> Fut + Send + Sync,
@@ -261,4 +381,57 @@ where
 	fn resolve(&self, input: &str) -> impl Future<Output = Result<Resolved, Self::Error>> + Send {
 		self(input)
 	}
+}
+
+// ============================================================================
+// Generic Struct Support (Task 7)
+// ============================================================================
+
+/// Error type for generic struct resolution.
+#[derive(Debug)]
+pub enum StructResolveError<E> {
+	/// Serialization error.
+	Serialize(serde_json::Error),
+	/// Resolution error.
+	Resolve(Error<E>),
+	/// Deserialization error.
+	Deserialize(serde_json::Error),
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for StructResolveError<E> {
+	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+		match self {
+			Self::Serialize(e) => write!(f, "serialization error: {e}"),
+			Self::Resolve(e) => write!(f, "resolution error: {e}"),
+			Self::Deserialize(e) => write!(f, "deserialization error: {e}"),
+		}
+	}
+}
+
+#[cfg(feature = "std")]
+impl<E: std::error::Error + 'static> std::error::Error for StructResolveError<E> {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		match self {
+			Self::Serialize(e) | Self::Deserialize(e) => Some(e),
+			Self::Resolve(e) => Some(e),
+		}
+	}
+}
+
+/// Resolve strings in any serializable struct via JSON round-trip.
+#[cfg(feature = "json")]
+pub async fn resolve_struct<T, R>(
+	value: T,
+	resolver: &R,
+	config: &Config,
+) -> Result<T, StructResolveError<R::Error>>
+where
+	T: serde::Serialize + serde::de::DeserializeOwned,
+	R: Resolver,
+{
+	let json = serde_json::to_value(value).map_err(StructResolveError::Serialize)?;
+	let resolved = json::resolve(json, resolver, config)
+		.await
+		.map_err(StructResolveError::Resolve)?;
+	serde_json::from_value(resolved).map_err(StructResolveError::Deserialize)
 }

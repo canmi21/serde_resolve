@@ -14,9 +14,9 @@ repository = "https://github.com/canmi21/serde_resolve.git"
 all-features = true
 
 [dependencies]
+serde = "1"
 serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
 serde_yaml = { version = "0.9", optional = true }
-thiserror = "2"
 toml = { version = "0.9", optional = true }
 tracing = { version = "0.1", default-features = false, optional = true }
 
@@ -24,7 +24,7 @@ tracing = { version = "0.1", default-features = false, optional = true }
 default = ["std"]
 
 # Standard library support (enables full functionality)
-std = ["thiserror/std", "serde_json?/std"]
+std = ["serde_json?/std"]
 
 # Format modules
 json = ["dep:serde_json"]

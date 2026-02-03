@@ -3,12 +3,10 @@
 //!
 //! This module requires the `std` feature.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::pin::Pin;
 use toml::Value;
 
-use crate::{Config, Error, Resolved, Resolver};
+use crate::{Config, Error, Resolver};
 
 /// Resolve all strings in a TOML [`Value`].
 ///
@@ -21,66 +19,60 @@ pub async fn resolve<R>(
 where
 	R: Resolver,
 {
-	resolve_recursive(value, resolver, config, 0).await
+	#[cfg(feature = "tracing")]
+	let mut path = Vec::new();
+
+	resolve_recursive(
+		value,
+		resolver,
+		config,
+		0,
+		#[cfg(feature = "tracing")]
+		&mut path,
+	)
+	.await
 }
 
-fn resolve_recursive<'a, R>(
-	value: Value,
-	resolver: &'a R,
-	config: &'a Config,
-	depth: usize,
-) -> Pin<Box<dyn std::future::Future<Output = Result<Value, Error<R::Error>>> + Send + 'a>>
-where
-	R: Resolver,
-{
-	Box::pin(async move {
-		if depth > config.max_depth {
-			return Err(Error::depth_exceeded(config.max_depth));
-		}
-
-		match value {
-			Value::String(s) => match resolver.resolve(&s).await.map_err(Error::resolver)? {
-				Resolved::Changed(new_s) => Ok(Value::String(new_s)),
-				Resolved::Unchanged => Ok(Value::String(s)),
-			},
-
-			Value::Array(arr) => {
-				let mut result = Vec::with_capacity(arr.len());
-				for item in arr {
-					result.push(resolve_recursive(item, resolver, config, depth + 1).await?);
+impl_resolve_recursive!(
+		Value,
+		Value::String,
+		Value::Array,
+		Value::Table,
+		toml::map::Map::with_capacity,
+		|k: &alloc::string::String| k.clone(),
+		resolver, config, depth, path, key,
+		{
+				match resolver.resolve(&key).await.map_err(crate::Error::resolver)? {
+						crate::Resolved::Changed(new_key) => new_key,
+						crate::Resolved::Unchanged => key,
 				}
-				Ok(Value::Array(result))
-			}
+		},
+		{
+				// TOML-specific types
+				Value::Datetime(dt) => Ok(Value::Datetime(dt)),
 
-			Value::Table(table) => {
-				let mut result = toml::map::Map::with_capacity(table.len());
-				for (key, val) in table {
-					let resolved_key = if config.resolve_keys {
-						match resolver.resolve(&key).await.map_err(Error::resolver)? {
-							Resolved::Changed(new_key) => new_key,
-							Resolved::Unchanged => key,
-						}
-					} else {
-						key
-					};
-					let resolved_val = resolve_recursive(val, resolver, config, depth + 1).await?;
-					result.insert(resolved_key, resolved_val);
-				}
-				Ok(Value::Table(result))
-			}
-
-			// TOML-specific types
-			Value::Datetime(dt) => Ok(Value::Datetime(dt)),
-
-			// Pass through unchanged
-			other @ (Value::Integer(_) | Value::Float(_) | Value::Boolean(_)) => Ok(other),
+				// Pass through unchanged
+				other @ (Value::Integer(_) | Value::Float(_) | Value::Boolean(_)) => Ok(other),
 		}
-	})
+);
+
+#[cfg(feature = "tracing")]
+fn value_type_name(value: &Value) -> &'static str {
+	match value {
+		Value::String(_) => "string",
+		Value::Integer(_) => "integer",
+		Value::Float(_) => "float",
+		Value::Boolean(_) => "boolean",
+		Value::Datetime(_) => "datetime",
+		Value::Array(_) => "array",
+		Value::Table(_) => "table",
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Resolved;
 	use alloc::string::ToString;
 	use core::convert::Infallible;
 	use toml::map::Map;

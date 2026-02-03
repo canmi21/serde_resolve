@@ -1,3 +1,5 @@
+/* examples/custom_resolver.rs */
+
 //! Custom Resolver: implement the Resolver trait for reusable logic.
 
 use serde_resolve::{json, Config, Resolved, Resolver};

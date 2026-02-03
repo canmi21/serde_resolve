@@ -1,3 +1,5 @@
+/* src/yaml.rs */
+
 //! YAML support via `serde_yaml`.
 //!
 //! This module requires the `std` feature.

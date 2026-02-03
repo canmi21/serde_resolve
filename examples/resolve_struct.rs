@@ -1,3 +1,5 @@
+/* examples/resolve_struct.rs */
+
 //! Resolve strings in a typed struct via JSON round-trip.
 
 use serde::{Deserialize, Serialize};

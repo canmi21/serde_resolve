@@ -1,3 +1,5 @@
+/* examples/selective.rs */
+
 //! Selective resolution: only transform strings matching a pattern.
 
 use serde_resolve::{json, Config, Resolved};

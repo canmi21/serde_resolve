@@ -1,3 +1,5 @@
+/* src/toml.rs */
+
 //! TOML support via `toml` crate.
 //!
 //! This module requires the `std` feature.

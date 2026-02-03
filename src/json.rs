@@ -1,3 +1,5 @@
+/* src/json.rs */
+
 //! JSON support via `serde_json`.
 //!
 //! This module is available with the `json` feature and supports `no_std` environments.

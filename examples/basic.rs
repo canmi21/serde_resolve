@@ -1,3 +1,5 @@
+/* examples/basic.rs */
+
 //! Basic example: transform all strings to uppercase.
 
 use serde_resolve::{json, Config, Resolved};

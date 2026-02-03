@@ -59,6 +59,7 @@ pub enum PathSegment {
 	Index(usize),
 }
 
+#[cfg(any(feature = "json", feature = "yaml", feature = "toml"))]
 macro_rules! impl_resolve_recursive {
     (
         $value_type:ty,

@@ -1,3 +1,5 @@
+/* examples/resolve_keys.rs */
+
 //! Resolve object keys in addition to values.
 
 use serde_resolve::{json, Config, Resolved};

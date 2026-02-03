@@ -1,48 +1,44 @@
-# Sigterm
+# Serde Resolve
 
-Signal-aware async control and cancellation primitives for Tokio.
+Recursively traverse serde data structures and transform string values.
 
-`sigterm` abstracts away the boilerplate of listening for system signals (`Ctrl+C`, `SIGTERM`, etc.) and coordinating shutdown across multiple asynchronous tasks.
+`serde_resolve` provides async string transformation for nested JSON, YAML, and TOML structures. Pass a resolver function to selectively transform strings based on patterns, templates, or any custom logic.
 
 ## Features
 
-- **Signal Waiting**: Wait for `Ctrl+C` or `SIGTERM` across platforms with a single `await`. Use `try_wait()` for non-panicking version.
-- **Cancellation Tokens**: Hierarchy-based cancellation (parent cancels child) powered by `tokio-util`.
-- **Shutdown Primitives**:
-  - `Shutdown`: One-shot channel for single-task termination.
-  - `Broadcast`: Notify multiple subscribers of a shutdown event.
-  - `ShutdownGuard`: RAII guard that triggers shutdown when dropped (useful for panics).
-- **Framework Integration**: `shutdown_signal()` helper designed for seamless integration with `axum::serve`.
-- **Unix Extensions**: Listen for custom signal sets (`SIGHUP`, `SIGQUIT`, etc.) on Unix systems.
+- **Async Traversal**: Recursively walk any serde-compatible structure with async resolvers.
+- **Selective Transformation**: Return `Resolved::Changed` to transform or `Resolved::Unchanged` to skip.
+- **Multi-Format Support**: Works with JSON (`no_std`), YAML, and TOML value types.
+- **Typed Structs**: `resolve_struct()` transforms any `Serialize + DeserializeOwned` type via JSON round-trip.
+- **Key Resolution**: Optionally resolve object/map keys in addition to values.
+- **Depth Limiting**: Configurable max depth to prevent stack overflow on malicious input.
 
 ## Usage Examples
 
 Check the `examples` directory for runnable code:
 
-- **Basic Usage**: [`examples/simple.rs`](examples/simple.rs) - Wait for a simple shutdown signal.
-- **Server Integration**: [`examples/shutdown_signal.rs`](examples/shutdown_signal.rs) - Combine system signals with internal cancellation (e.g., for Axum).
-- **Task Orchestration**: [`examples/broadcast.rs`](examples/broadcast.rs) - Coordinate multiple workers.
-- **Hierarchical Cancellation**: [`examples/cancellation.rs`](examples/cancellation.rs) - Manage tree-structured tasks.
-- **Scope Guard**: [`examples/guard.rs`](examples/guard.rs) - Ensure shutdown on exit or panic.
+- **Basic Usage**: [`examples/basic.rs`](examples/basic.rs) - Transform all strings to uppercase.
+- **Selective Resolution**: [`examples/selective.rs`](examples/selective.rs) - Only transform strings matching a pattern.
+- **Custom Resolver**: [`examples/custom_resolver.rs`](examples/custom_resolver.rs) - Implement the `Resolver` trait for reusable logic.
+- **Typed Structs**: [`examples/resolve_struct.rs`](examples/resolve_struct.rs) - Resolve strings in a typed struct.
+- **Key Resolution**: [`examples/resolve_keys.rs`](examples/resolve_keys.rs) - Resolve object keys in addition to values.
 
 ## Installation
 
 ```toml
 [dependencies]
-sigterm = { version = "0.3", features = ["full"] }
+serde_resolve = { version = "0.1", features = ["full"] }
 ```
 
 ## Feature Flags
 
 | Feature | Description |
 |---------|-------------|
-| `signal` | Enables signal handling (Ctrl+C, SIGTERM) - enabled by default. |
-| `sync` | Enables synchronization primitives (`Shutdown`, `Broadcast`). |
-| `macros` | Enables Tokio macro support. |
-| `rt` | Enables Tokio runtime support (required for `wait_for`). |
-| `cancel` | Enables hierarchical cancellation tokens via `tokio-util`. |
-| `time` | Enables timeout support for signal waiting. |
-| `tracing` | Enables optional tracing instrumentation for debugging. |
+| `std` | Standard library support (enabled by default). |
+| `json` | JSON support via `serde_json` (`no_std` compatible). |
+| `yaml` | YAML support via `serde_yaml` (requires `std`). |
+| `toml` | TOML support via `toml` crate (requires `std`). |
+| `tracing` | Debug logging via `tracing` crate. |
 | `full` | Enables all features above. |
 
 ## License
